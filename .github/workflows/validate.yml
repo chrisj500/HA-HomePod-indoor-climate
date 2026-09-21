@@ -15,6 +15,9 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
+          # The connected publisher cannot edit GitHub repository metadata.
+          # These checks do not affect installation as a HACS custom repository.
+          ignore: description topics
 
   hassfest:
     runs-on: ubuntu-latest
