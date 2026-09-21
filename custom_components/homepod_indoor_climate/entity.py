@@ -23,7 +23,7 @@ class HomePodIndoorClimateEntity(Entity):
             name="HomePod Indoor Climate",
             manufacturer="Home Assistant Community",
             model="Authenticated Apple Home bridge",
-            configuration_url="https://github.com/chrisj500/HA-Homepod-indoor-climate",
+            configuration_url="https://github.com/chrisj500/HA-HomePod-indoor-climate",
         )
 
     async def async_added_to_hass(self) -> None:
