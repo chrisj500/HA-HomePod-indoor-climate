@@ -1,0 +1,86 @@
+"""Tests for pure data helpers."""
+
+from datetime import UTC, datetime, timedelta
+import importlib.util
+from pathlib import Path
+import sys
+
+
+MODULE_PATH = (
+    Path(__file__).parents[1]
+    / "custom_components"
+    / "homepod_indoor_climate"
+    / "models.py"
+)
+SPEC = importlib.util.spec_from_file_location("homepod_indoor_climate_models", MODULE_PATH)
+assert SPEC and SPEC.loader
+models = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = models
+SPEC.loader.exec_module(models)
+
+
+def test_parse_rooms_and_slugify() -> None:
+    assert models.parse_rooms("Living Room\nPrimary Bedroom") == [
+        {"key": "living_room", "name": "Living Room"},
+        {"key": "primary_bedroom", "name": "Primary Bedroom"},
+    ]
+
+
+def test_parse_rooms_rejects_duplicate_keys() -> None:
+    try:
+        models.parse_rooms("Living Room, living-room")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Duplicate normalized room key was accepted")
+
+
+def test_validate_and_convert_temperature() -> None:
+    reading = models.validate_reading(
+        {"room": "Living Room", "temperature_c": 20, "humidity": 45},
+        {"living_room"},
+    )
+    assert reading.temperature_f == 68
+    assert reading.humidity == 45
+
+    apple_style = models.validate_reading(
+        {"room": "living_room", "temperature_c": "20 °C", "humidity": "45%"},
+        {"living_room"},
+    )
+    assert apple_style.temperature_f == 68
+
+
+def test_rejects_unknown_room_and_bad_values() -> None:
+    for payload in (
+        {"room": "Garage", "temperature_c": 20, "humidity": 45},
+        {"room": "Living Room", "temperature_c": 100, "humidity": 45},
+        {"room": "Living Room", "temperature_c": 20, "humidity": 101},
+    ):
+        try:
+            models.validate_reading(payload, {"living_room"})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid payload was accepted")
+
+
+def test_fresh_only_aggregate() -> None:
+    now = datetime.now(UTC)
+    fresh = models.Reading("living_room", 20, 40, now.isoformat())
+    fresh_two = models.Reading("bedroom", 22, 50, now.isoformat())
+    stale = models.Reading(
+        "office", 35, 90, (now - timedelta(minutes=30)).isoformat()
+    )
+    values = models.fresh_readings([fresh, fresh_two, stale], now, 15)
+    stats = models.aggregate(values)
+    assert stats["count"] == 2
+    assert stats["average_temperature_f"] == 69.8
+    assert stats["average_humidity"] == 45
+    assert round(stats["temperature_spread_f"], 1) == 3.6
+
+
+def test_empty_aggregate_is_unavailable() -> None:
+    stats = models.aggregate([])
+    assert stats["count"] == 0
+    assert stats["average_temperature_f"] is None
+    assert stats["average_humidity"] is None

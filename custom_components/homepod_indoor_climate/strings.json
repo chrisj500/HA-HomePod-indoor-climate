@@ -1,0 +1,45 @@
+{
+  "title": "HomePod Indoor Climate",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure HomePod Indoor Climate",
+        "description": "Enter one room per line. Apple Home will submit readings for these room keys.",
+        "data": {
+          "rooms": "HomePod rooms",
+          "update_interval_minutes": "Refresh interval",
+          "stale_after_minutes": "Mark readings stale after",
+          "local_only": "Accept submissions only from the local network",
+          "allowed_user_id": "Only accept this Home Assistant user (optional)"
+        },
+        "data_description": {
+          "rooms": "Names become lowercase room keys, for example Living Room becomes living_room.",
+          "allowed_user_id": "Select the dedicated user whose long-lived access token the Apple Home automation will use."
+        }
+      }
+    },
+    "error": {
+      "invalid_rooms": "Enter at least one unique room name containing letters or numbers."
+    },
+    "abort": {
+      "already_configured": "HomePod Indoor Climate is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HomePod Indoor Climate options",
+        "data": {
+          "rooms": "HomePod rooms",
+          "update_interval_minutes": "Refresh interval",
+          "stale_after_minutes": "Mark readings stale after",
+          "local_only": "Accept submissions only from the local network",
+          "allowed_user_id": "Only accept this Home Assistant user (optional)"
+        }
+      }
+    },
+    "error": {
+      "invalid_rooms": "Enter at least one unique room name containing letters or numbers."
+    }
+  }
+}
