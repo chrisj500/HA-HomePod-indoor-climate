@@ -43,7 +43,8 @@ async def async_get_config_entry_diagnostics(
         },
         "runtime": runtime.diagnostics_snapshot(),
         "note": (
-            "Requests rejected by Home Assistant authentication before reaching "
-            "this integration cannot be counted by integration diagnostics."
+            "The integration records requests before bearer-token validation so "
+            "missing or invalid Authorization headers are observable without "
+            "logging token contents."
         ),
     }
