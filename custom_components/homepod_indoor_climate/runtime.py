@@ -1,9 +1,10 @@
-"""Runtime state and refresh scheduling."""
+"""Runtime state, refresh scheduling, and diagnostics."""
 
 from __future__ import annotations
 
 from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
+import logging
 from time import monotonic
 from typing import Any
 
@@ -34,9 +35,16 @@ from .models import (
     validate_readings,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    """Return an ISO timestamp for diagnostics."""
+    return value.isoformat() if value else None
+
 
 class HomePodIndoorClimateRuntime:
-    """Own readings, persistence, and the HomeKit refresh pulse."""
+    """Own readings, persistence, refresh scheduling, and diagnostics."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -44,6 +52,34 @@ class HomePodIndoorClimateRuntime:
         self.readings: dict[str, Reading] = {}
         self.refresh_active = False
         self.last_submission: datetime | None = None
+
+        self.refresh_sequence = 0
+        self.refresh_request_count = 0
+        self.refresh_timeout_count = 0
+        self.refresh_submission_count = 0
+        self.refresh_manual_end_count = 0
+        self.refresh_superseded_count = 0
+        self.current_refresh_sequence: int | None = None
+        self.current_refresh_source: str | None = None
+        self.current_refresh_started_at: datetime | None = None
+        self.current_refresh_deadline: datetime | None = None
+        self.last_refresh_sequence: int | None = None
+        self.last_refresh_source: str | None = None
+        self.last_refresh_requested_at: datetime | None = None
+        self.last_refresh_completed_at: datetime | None = None
+        self.last_refresh_result = "never"
+        self.last_refresh_latency_ms: int | None = None
+
+        self.api_request_count = 0
+        self.api_accepted_count = 0
+        self.api_rejected_count = 0
+        self.last_api_request_at: datetime | None = None
+        self.last_api_result = "never"
+        self.last_api_request_during_refresh = False
+        self.last_api_refresh_sequence: int | None = None
+        self.last_api_accepted_rooms = 0
+        self.last_api_ignored_rooms: list[str] = []
+
         self._cancel_interval: CALLBACK_TYPE | None = None
         self._cancel_pulse: CALLBACK_TYPE | None = None
         self._cancel_initial: CALLBACK_TYPE | None = None
@@ -54,22 +90,27 @@ class HomePodIndoorClimateRuntime:
 
     @property
     def settings(self) -> dict[str, Any]:
+        """Return merged config-entry settings."""
         return {**self.entry.data, **self.entry.options}
 
     @property
     def rooms(self) -> list[dict[str, str]]:
+        """Return configured rooms."""
         return list(self.settings[CONF_ROOMS])
 
     @property
     def room_keys(self) -> set[str]:
+        """Return configured room keys."""
         return {room["key"] for room in self.rooms}
 
     @property
     def stale_after(self) -> int:
+        """Return freshness threshold in minutes."""
         return int(self.settings.get(CONF_STALE_AFTER, DEFAULT_STALE_AFTER))
 
     @property
     def signal(self) -> str:
+        """Return dispatcher signal for this config entry."""
         return f"{SIGNAL_UPDATE}_{self.entry.entry_id}"
 
     async def async_start(self) -> None:
@@ -92,7 +133,9 @@ class HomePodIndoorClimateRuntime:
         self._cancel_interval = async_track_time_interval(
             self.hass, self._async_interval, timedelta(minutes=interval)
         )
-        self._cancel_initial = async_call_later(self.hass, 10, self._async_initial_refresh)
+        self._cancel_initial = async_call_later(
+            self.hass, 10, self._async_initial_refresh
+        )
         self._notify()
 
     async def async_stop(self) -> None:
@@ -115,24 +158,31 @@ class HomePodIndoorClimateRuntime:
             self.readings[reading.room] = reading
         self.last_submission = datetime.now(UTC)
         await self._async_save_state()
-        self.async_end_refresh()
-        self._notify()
+
+        ended_refresh = self.async_end_refresh("submission")
+        if not ended_refresh:
+            self._notify()
         return len(accepted), ignored_rooms
 
     async def _async_save_state(self) -> None:
-        """Persist the current configured readings."""
+        """Persist current configured readings."""
         await self._store.async_save(
             {
                 "last_submission": (
                     self.last_submission.isoformat() if self.last_submission else None
                 ),
-                "readings": {room: reading.as_dict() for room, reading in self.readings.items()},
+                "readings": {
+                    room: reading.as_dict()
+                    for room, reading in self.readings.items()
+                },
             }
         )
 
     def fresh(self, now: datetime | None = None) -> list[Reading]:
         """Return fresh readings."""
-        return fresh_readings(self.readings.values(), now or datetime.now(UTC), self.stale_after)
+        return fresh_readings(
+            self.readings.values(), now or datetime.now(UTC), self.stale_after
+        )
 
     def stats(self, now: datetime | None = None) -> dict[str, float | int | None]:
         """Return aggregate values for fresh readings."""
@@ -152,37 +202,185 @@ class HomePodIndoorClimateRuntime:
         return True
 
     @callback
-    def async_request_refresh(self) -> None:
-        """Pulse the switch exposed to Apple Home."""
+    def record_api_request(self) -> None:
+        """Record that an authenticated request reached the integration."""
+        self.api_request_count += 1
+        self.last_api_request_at = datetime.now(UTC)
+        self.last_api_result = "received"
+        self.last_api_request_during_refresh = self.refresh_active
+        self.last_api_refresh_sequence = self.current_refresh_sequence
+        self._notify()
+
+    @callback
+    def record_api_rejection(self, reason: str) -> None:
+        """Record an API request rejected after authentication."""
+        self.api_rejected_count += 1
+        self.last_api_result = reason
+        self.last_api_accepted_rooms = 0
+        self.last_api_ignored_rooms = []
+        self._notify()
+
+    @callback
+    def record_api_accept(self, accepted: int, ignored_rooms: list[str]) -> None:
+        """Record a successful API submission."""
+        self.api_accepted_count += 1
+        self.last_api_result = "accepted"
+        self.last_api_accepted_rooms = accepted
+        self.last_api_ignored_rooms = list(ignored_rooms)
+        self._notify()
+
+    @callback
+    def async_request_refresh(self, source: str = "manual") -> None:
+        """Pulse the HomeKit-visible switch and record request diagnostics."""
+        now = datetime.now(UTC)
+
+        if self.refresh_active:
+            self._complete_refresh("superseded", now, notify=False)
+
         if self._cancel_pulse:
             self._cancel_pulse()
+            self._cancel_pulse = None
+
+        self.refresh_sequence += 1
+        self.refresh_request_count += 1
+        self.current_refresh_sequence = self.refresh_sequence
+        self.current_refresh_source = source
+        self.current_refresh_started_at = now
+        self.current_refresh_deadline = now + timedelta(seconds=PULSE_SECONDS)
+        self.last_refresh_sequence = self.refresh_sequence
+        self.last_refresh_source = source
+        self.last_refresh_requested_at = now
+        self.last_refresh_result = "pending"
+        self.last_refresh_latency_ms = None
         self.refresh_active = True
+
+        _LOGGER.debug(
+            "Refresh %s requested (%s)",
+            self.current_refresh_sequence,
+            source,
+        )
         self._notify()
         self._cancel_pulse = async_call_later(
             self.hass, PULSE_SECONDS, self._async_end_refresh_later
         )
 
     @callback
-    def async_end_refresh(self) -> None:
-        """End an active refresh pulse."""
+    def async_end_refresh(self, reason: str = "manual_off") -> bool:
+        """End an active refresh pulse and record why it ended."""
+        if not self.refresh_active:
+            return False
+
         if self._cancel_pulse:
             self._cancel_pulse()
             self._cancel_pulse = None
-        if self.refresh_active:
-            self.refresh_active = False
+
+        self._complete_refresh(reason, datetime.now(UTC), notify=True)
+        return True
+
+    @callback
+    def _complete_refresh(
+        self, reason: str, completed_at: datetime, *, notify: bool
+    ) -> None:
+        """Finalize diagnostics for the current refresh."""
+        started_at = self.current_refresh_started_at
+        sequence = self.current_refresh_sequence
+
+        self.refresh_active = False
+        self.last_refresh_completed_at = completed_at
+        self.last_refresh_result = reason
+        if started_at is not None:
+            self.last_refresh_latency_ms = round(
+                (completed_at - started_at).total_seconds() * 1000
+            )
+
+        if reason == "timeout":
+            self.refresh_timeout_count += 1
+        elif reason == "submission":
+            self.refresh_submission_count += 1
+        elif reason == "manual_off":
+            self.refresh_manual_end_count += 1
+        elif reason == "superseded":
+            self.refresh_superseded_count += 1
+
+        _LOGGER.debug(
+            "Refresh %s completed (%s) after %sms",
+            sequence,
+            reason,
+            self.last_refresh_latency_ms,
+        )
+
+        self.current_refresh_sequence = None
+        self.current_refresh_source = None
+        self.current_refresh_started_at = None
+        self.current_refresh_deadline = None
+
+        if notify:
             self._notify()
 
     @callback
+    def diagnostics_snapshot(self) -> dict[str, Any]:
+        """Return JSON-serializable runtime diagnostics."""
+        now = datetime.now(UTC)
+        current_age_seconds: float | None = None
+        if self.current_refresh_started_at is not None:
+            current_age_seconds = round(
+                (now - self.current_refresh_started_at).total_seconds(), 3
+            )
+
+        return {
+            "refresh": {
+                "active": self.refresh_active,
+                "sequence": self.refresh_sequence,
+                "request_count": self.refresh_request_count,
+                "timeout_count": self.refresh_timeout_count,
+                "submission_count": self.refresh_submission_count,
+                "manual_end_count": self.refresh_manual_end_count,
+                "superseded_count": self.refresh_superseded_count,
+                "current_sequence": self.current_refresh_sequence,
+                "current_source": self.current_refresh_source,
+                "current_started_at": _isoformat(self.current_refresh_started_at),
+                "current_deadline": _isoformat(self.current_refresh_deadline),
+                "current_age_seconds": current_age_seconds,
+                "last_sequence": self.last_refresh_sequence,
+                "last_source": self.last_refresh_source,
+                "last_requested_at": _isoformat(self.last_refresh_requested_at),
+                "last_completed_at": _isoformat(self.last_refresh_completed_at),
+                "last_result": self.last_refresh_result,
+                "last_latency_ms": self.last_refresh_latency_ms,
+                "pulse_seconds": PULSE_SECONDS,
+            },
+            "api": {
+                "request_count": self.api_request_count,
+                "accepted_count": self.api_accepted_count,
+                "rejected_count": self.api_rejected_count,
+                "last_request_at": _isoformat(self.last_api_request_at),
+                "last_result": self.last_api_result,
+                "last_request_during_refresh": self.last_api_request_during_refresh,
+                "last_refresh_sequence": self.last_api_refresh_sequence,
+                "last_accepted_rooms": self.last_api_accepted_rooms,
+                "last_ignored_rooms": list(self.last_api_ignored_rooms),
+                "pre_auth_failures_observable": False,
+            },
+            "readings": {
+                "configured_rooms": len(self.rooms),
+                "fresh_rooms": len(self.fresh()),
+                "last_submission": _isoformat(self.last_submission),
+                "stale_after_minutes": self.stale_after,
+            },
+        }
+
+    @callback
     def _notify(self) -> None:
+        """Notify entities that runtime state changed."""
         async_dispatcher_send(self.hass, self.signal)
 
     async def _async_interval(self, _now: datetime) -> None:
-        self.async_request_refresh()
+        self.async_request_refresh("scheduled")
 
     async def _async_initial_refresh(self, _now: datetime) -> None:
         self._cancel_initial = None
-        self.async_request_refresh()
+        self.async_request_refresh("initial")
 
     async def _async_end_refresh_later(self, _now: datetime) -> None:
         self._cancel_pulse = None
-        self.async_end_refresh()
+        self.async_end_refresh("timeout")
