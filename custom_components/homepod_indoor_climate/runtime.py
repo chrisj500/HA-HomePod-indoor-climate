@@ -71,10 +71,15 @@ class HomePodIndoorClimateRuntime:
         self.last_refresh_latency_ms: int | None = None
 
         self.api_request_count = 0
+        self.api_authenticated_count = 0
+        self.api_auth_failure_count = 0
         self.api_accepted_count = 0
         self.api_rejected_count = 0
         self.last_api_request_at: datetime | None = None
         self.last_api_result = "never"
+        self.last_api_auth_result = "never"
+        self.last_api_authorization_header_present = False
+        self.last_api_private_source = False
         self.last_api_request_during_refresh = False
         self.last_api_refresh_sequence: int | None = None
         self.last_api_accepted_rooms = 0
@@ -202,18 +207,41 @@ class HomePodIndoorClimateRuntime:
         return True
 
     @callback
-    def record_api_request(self) -> None:
-        """Record that an authenticated request reached the integration."""
+    def record_api_request(
+        self, *, authorization_header_present: bool, private_source: bool
+    ) -> None:
+        """Record every HTTP request that reaches the integration route."""
         self.api_request_count += 1
         self.last_api_request_at = datetime.now(UTC)
         self.last_api_result = "received"
+        self.last_api_auth_result = "pending"
+        self.last_api_authorization_header_present = authorization_header_present
+        self.last_api_private_source = private_source
         self.last_api_request_during_refresh = self.refresh_active
         self.last_api_refresh_sequence = self.current_refresh_sequence
         self._notify()
 
     @callback
+    def record_api_authenticated(self) -> None:
+        """Record successful Home Assistant bearer authentication."""
+        self.api_authenticated_count += 1
+        self.last_api_auth_result = "authenticated"
+        self._notify()
+
+    @callback
+    def record_api_auth_failure(self, reason: str) -> None:
+        """Record a request that reached the route but failed HA authentication."""
+        self.api_auth_failure_count += 1
+        self.api_rejected_count += 1
+        self.last_api_auth_result = reason
+        self.last_api_result = reason
+        self.last_api_accepted_rooms = 0
+        self.last_api_ignored_rooms = []
+        self._notify()
+
+    @callback
     def record_api_rejection(self, reason: str) -> None:
-        """Record an API request rejected after authentication."""
+        """Record an authenticated API request rejected by integration policy."""
         self.api_rejected_count += 1
         self.last_api_result = reason
         self.last_api_accepted_rooms = 0
@@ -351,15 +379,22 @@ class HomePodIndoorClimateRuntime:
             },
             "api": {
                 "request_count": self.api_request_count,
+                "authenticated_count": self.api_authenticated_count,
+                "auth_failure_count": self.api_auth_failure_count,
                 "accepted_count": self.api_accepted_count,
                 "rejected_count": self.api_rejected_count,
                 "last_request_at": _isoformat(self.last_api_request_at),
                 "last_result": self.last_api_result,
+                "last_auth_result": self.last_api_auth_result,
+                "last_authorization_header_present": (
+                    self.last_api_authorization_header_present
+                ),
+                "last_private_source": self.last_api_private_source,
                 "last_request_during_refresh": self.last_api_request_during_refresh,
                 "last_refresh_sequence": self.last_api_refresh_sequence,
                 "last_accepted_rooms": self.last_api_accepted_rooms,
                 "last_ignored_rooms": list(self.last_api_ignored_rooms),
-                "pre_auth_failures_observable": False,
+                "pre_auth_failures_observable": True,
             },
             "readings": {
                 "configured_rooms": len(self.rooms),
