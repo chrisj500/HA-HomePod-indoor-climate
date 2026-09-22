@@ -124,7 +124,7 @@ jobs:
 
           create_release_if_missing             "v0.1.1"             "be220ff4163f76c255cfda6e542d8aa154b5b7c7"             "Adds cleanup of obsolete room entities and stored readings when room configuration changes."             "--latest=false"
 
-          create_release_if_missing             "v0.1.2"             "78c5443204494336c8e12e717d423e10d4e19cdf"             "Makes room updates tolerant of removed room keys and preserves configured-room ingestion."             "--latest"
+          create_release_if_missing             "v0.1.2"             "$GITHUB_SHA"             "Makes room updates tolerant of removed room keys and preserves configured-room ingestion."             "--latest"
 
       - name: Publish the current manifest version when integration code changed
         env:
