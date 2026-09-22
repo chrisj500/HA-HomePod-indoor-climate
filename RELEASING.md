@@ -13,11 +13,13 @@ HomePod Indoor Climate uses published GitHub Releases as the authoritative versi
 
 ## Historical releases
 
-The release workflow backfills the original stable versions at their exact commits:
+The release workflow backfills the original stable versions using release-snapshot commits:
 
-- `v0.1.0` -> `66d90ce3b8b0525fce19f4fefb4a5fe4d0548950`
-- `v0.1.1` -> `b99039082a8d509cd3823802c41e41a2120b523f`
-- `v0.1.2` -> `6ecb25d940cfc524bb11e214e8e0cc3c8bd6af00`
+- `v0.1.0` -> `75caa2748c141401209a2473eec0d6085feccfa2`
+- `v0.1.1` -> `be220ff4163f76c255cfda6e542d8aa154b5b7c7`
+- `v0.1.2` -> the current validated `main` snapshot used for the backfill.
+
+The v0.1.0 and v0.1.1 snapshot branches preserve the exact historical integration contents under `custom_components/homepod_indoor_climate/`. Their workflow file is aligned with current `main` only to satisfy GitHub's release-token restrictions for historical commits. This does not change the integration payload HACS installs.
 
 The backfill is idempotent: if a release already exists, the workflow leaves it untouched.
 
