@@ -70,6 +70,7 @@ async def async_setup_entry(
             ),
             FreshRoomCountSensor(runtime),
             LastSubmissionSensor(runtime),
+            RefreshDiagnosticsSensor(runtime),
         )
     )
     async_add_entities(entities)
@@ -233,3 +234,21 @@ class LastSubmissionSensor(HomePodIndoorClimateEntity, SensorEntity):
             ),
             "accepted_room_keys": sorted(self.runtime.room_keys),
         }
+
+
+class RefreshDiagnosticsSensor(HomePodIndoorClimateEntity, SensorEntity):
+    """Summarize refresh and API diagnostics."""
+
+    _attr_name = "Refresh Diagnostics"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, runtime: HomePodIndoorClimateRuntime) -> None:
+        super().__init__(runtime, "refresh_diagnostics")
+
+    @property
+    def native_value(self) -> str:
+        return self.runtime.last_refresh_result
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.runtime.diagnostics_snapshot()

@@ -135,6 +135,20 @@ when local-only mode is enabled, unknown rooms, impossible values, oversized
 bodies, and excessive request rates. Valid ranges are -40 to 60 °C and 0 to
 100% relative humidity.
 
+## Diagnostics
+
+The integration creates a **Refresh Diagnostics** entity that records the latest
+refresh lifecycle and API activity. It distinguishes initial, scheduled, and
+manual refreshes and reports whether the last pulse completed from a successful
+submission or simply timed out.
+
+For a fuller snapshot, open the HomePod Indoor Climate integration in Home
+Assistant and use **Download diagnostics**. The diagnostic payload includes
+refresh counters/timestamps, API acceptance or rejection information, freshness
+state, and correlation showing whether the most recent API request arrived
+during an active refresh pulse. Tokens and configured user identifiers are not
+included.
+
 ## Development validation
 
 Pure conversion, validation, freshness, and aggregate logic is covered by the

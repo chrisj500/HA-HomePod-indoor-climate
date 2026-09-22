@@ -15,6 +15,7 @@ STATIC_ENTITY_KEYS = frozenset(
         "last_submission",
         "stale_readings",
         "refresh",
+        "refresh_diagnostics",
     }
 )
 
