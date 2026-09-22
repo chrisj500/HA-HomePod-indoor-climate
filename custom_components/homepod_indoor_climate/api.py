@@ -6,9 +6,10 @@ import ipaddress
 import logging
 from http import HTTPStatus
 
-from aiohttp import web
+from aiohttp import hdrs, web
 from homeassistant.components.http import HomeAssistantView
-from homeassistant.components.http.const import KEY_HASS, KEY_HASS_USER
+from homeassistant.components.http.auth_util import async_user_not_allowed_do_auth
+from homeassistant.components.http.const import KEY_HASS
 from homeassistant.core import HomeAssistant
 
 from .const import API_NAME, API_PATH, CONF_ALLOWED_USER_ID, CONF_LOCAL_ONLY, DOMAIN
@@ -21,7 +22,7 @@ class HomePodIndoorClimateReadingsView(HomeAssistantView):
 
     url = API_PATH
     name = API_NAME
-    requires_auth = True
+    requires_auth = False
 
     async def post(self, request: web.Request, entry_id: str) -> web.Response:
         """Accept a single reading or batch."""
@@ -30,20 +31,31 @@ class HomePodIndoorClimateReadingsView(HomeAssistantView):
         if runtime is None:
             raise web.HTTPNotFound(text="Unknown integration entry")
 
-        runtime.record_api_request()
+        auth_header = request.headers.get(hdrs.AUTHORIZATION, "")
+        private_source = _is_private_request(request)
+        runtime.record_api_request(
+            authorization_header_present=bool(auth_header),
+            private_source=private_source,
+        )
+
+        user = _authenticate_request(hass, request, auth_header)
+        if user is None:
+            runtime.record_api_auth_failure(_auth_failure_reason(hass, request, auth_header))
+            raise web.HTTPUnauthorized(text="Invalid or missing Home Assistant bearer token")
+
+        runtime.record_api_authenticated()
         settings = runtime.settings
         allowed_user_id = settings.get(CONF_ALLOWED_USER_ID)
-        user = request.get(KEY_HASS_USER)
 
-        if allowed_user_id and (user is None or user.id != allowed_user_id):
+        if allowed_user_id and user.id != allowed_user_id:
             runtime.record_api_rejection("forbidden_user")
             raise web.HTTPForbidden(text="This token is not authorized for this bridge")
 
-        if settings.get(CONF_LOCAL_ONLY, True) and not _is_private_request(request):
+        if settings.get(CONF_LOCAL_ONLY, True) and not private_source:
             runtime.record_api_rejection("remote_rejected")
             raise web.HTTPForbidden(text="Remote submissions are disabled")
 
-        source = f"{getattr(user, 'id', 'unknown')}:{request.remote or 'unknown'}"
+        source = f"{user.id}:{request.remote or 'unknown'}"
         if not runtime.allow_submission(source):
             runtime.record_api_rejection("rate_limited")
             raise web.HTTPTooManyRequests(text="Too many submissions; try again shortly")
@@ -80,6 +92,54 @@ class HomePodIndoorClimateReadingsView(HomeAssistantView):
             },
             status=HTTPStatus.OK,
         )
+
+
+def _authenticate_request(
+    hass: HomeAssistant, request: web.Request, auth_header: str
+):
+    """Return the authenticated HA user or None."""
+    try:
+        auth_type, auth_value = auth_header.split(" ", 1)
+    except ValueError:
+        return None
+
+    if auth_type != "Bearer":
+        return None
+
+    refresh_token = hass.auth.async_validate_access_token(auth_value)
+    if refresh_token is None:
+        return None
+
+    if async_user_not_allowed_do_auth(hass, refresh_token.user, request):
+        return None
+
+    return refresh_token.user
+
+
+def _auth_failure_reason(
+    hass: HomeAssistant, request: web.Request, auth_header: str
+) -> str:
+    """Return a non-secret diagnostic reason for authentication failure."""
+    if not auth_header:
+        return "missing_authorization_header"
+
+    try:
+        auth_type, auth_value = auth_header.split(" ", 1)
+    except ValueError:
+        return "malformed_authorization_header"
+
+    if auth_type != "Bearer":
+        return "wrong_authorization_scheme"
+
+    refresh_token = hass.auth.async_validate_access_token(auth_value)
+    if refresh_token is None:
+        return "invalid_bearer_token"
+
+    restriction = async_user_not_allowed_do_auth(hass, refresh_token.user, request)
+    if restriction:
+        return "user_auth_restricted"
+
+    return "unknown_auth_failure"
 
 
 def _is_private_request(request: web.Request) -> bool:
