@@ -2,6 +2,8 @@ name: Validate
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -34,3 +36,123 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest
       - run: pytest -q
+
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a new manifest version for integration changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            compare_sha="$BASE_SHA"
+          else
+            compare_sha="$BEFORE_SHA"
+          fi
+
+          if [ -z "$compare_sha" ] || [ "$compare_sha" = "0000000000000000000000000000000000000000" ]; then
+            echo "No comparable base SHA; skipping version gate."
+            exit 0
+          fi
+
+          if git diff --quiet "$compare_sha" "$GITHUB_SHA" -- custom_components/homepod_indoor_climate; then
+            echo "Integration code is unchanged; no version bump required."
+            exit 0
+          fi
+
+          version="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = Path("custom_components/homepod_indoor_climate/manifest.json")
+          print(json.loads(manifest.read_text())["version"])
+          PY
+          )"
+          tag="v$version"
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Integration files changed but $tag is already published. Bump manifest.json to a new version before merging."
+            exit 1
+          fi
+
+          echo "Integration changes use unpublished version $tag."
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - hacs
+      - hassfest
+      - tests
+      - version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Backfill historical releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          create_release_if_missing() {
+            tag="$1"
+            target="$2"
+            notes="$3"
+            latest_flag="$4"
+
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "$tag already exists; skipping."
+              return
+            fi
+
+            gh release create "$tag"               --repo "$GITHUB_REPOSITORY"               --target "$target"               --title "$tag"               --notes "$notes"               "$latest_flag"
+          }
+
+          create_release_if_missing             "v0.1.0"             "66d90ce3b8b0525fce19f4fefb4a5fe4d0548950"             "Initial stable HACS release of HomePod Indoor Climate."             "--latest=false"
+
+          create_release_if_missing             "v0.1.1"             "b99039082a8d509cd3823802c41e41a2120b523f"             "Adds cleanup of obsolete room entities and stored readings when room configuration changes."             "--latest=false"
+
+          create_release_if_missing             "v0.1.2"             "6ecb25d940cfc524bb11e214e8e0cc3c8bd6af00"             "Makes room updates tolerant of removed room keys and preserves configured-room ingestion."             "--latest"
+
+      - name: Publish the current manifest version when integration code changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            if git diff --quiet "$BEFORE_SHA" "$GITHUB_SHA" -- custom_components/homepod_indoor_climate; then
+              echo "Integration code is unchanged; no new release needed."
+              exit 0
+            fi
+          fi
+
+          version="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = Path("custom_components/homepod_indoor_climate/manifest.json")
+          print(json.loads(manifest.read_text())["version"])
+          PY
+          )"
+          tag="v$version"
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$tag is already published."
+            exit 0
+          fi
+
+          gh release create "$tag"             --repo "$GITHUB_REPOSITORY"             --target "$GITHUB_SHA"             --title "$tag"             --generate-notes             --latest
