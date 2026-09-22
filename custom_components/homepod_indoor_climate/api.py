@@ -30,34 +30,48 @@ class HomePodIndoorClimateReadingsView(HomeAssistantView):
         if runtime is None:
             raise web.HTTPNotFound(text="Unknown integration entry")
 
+        runtime.record_api_request()
         settings = runtime.settings
         allowed_user_id = settings.get(CONF_ALLOWED_USER_ID)
         user = request.get(KEY_HASS_USER)
+
         if allowed_user_id and (user is None or user.id != allowed_user_id):
+            runtime.record_api_rejection("forbidden_user")
             raise web.HTTPForbidden(text="This token is not authorized for this bridge")
 
         if settings.get(CONF_LOCAL_ONLY, True) and not _is_private_request(request):
+            runtime.record_api_rejection("remote_rejected")
             raise web.HTTPForbidden(text="Remote submissions are disabled")
 
         source = f"{getattr(user, 'id', 'unknown')}:{request.remote or 'unknown'}"
         if not runtime.allow_submission(source):
+            runtime.record_api_rejection("rate_limited")
             raise web.HTTPTooManyRequests(text="Too many submissions; try again shortly")
 
         if request.content_length is not None and request.content_length > 16_384:
-            raise web.HTTPRequestEntityTooLarge(max_size=16_384, actual_size=request.content_length)
+            runtime.record_api_rejection("payload_too_large")
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=16_384, actual_size=request.content_length
+            )
+
         try:
             payload = await request.json()
         except (ValueError, TypeError) as err:
+            runtime.record_api_rejection("invalid_json")
             raise web.HTTPBadRequest(text="Expected a JSON object") from err
+
         if not isinstance(payload, dict):
+            runtime.record_api_rejection("invalid_json_object")
             raise web.HTTPBadRequest(text="Expected a JSON object")
 
         try:
             count, ignored_rooms = await runtime.async_ingest(payload)
         except ValueError as err:
+            runtime.record_api_rejection("invalid_reading")
             _LOGGER.warning("Rejected HomePod reading: %s", err)
             raise web.HTTPBadRequest(text=str(err)) from err
 
+        runtime.record_api_accept(count, ignored_rooms)
         return web.json_response(
             {
                 "accepted": count,
