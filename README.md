@@ -18,6 +18,8 @@ Incoming temperature values remain stored as Celsius internally and are exposed
 in Fahrenheit. The raw Celsius value is also available as a temperature entity
 attribute. Aggregate sensors exclude readings older than the configured stale
 threshold.
+Removing or renaming a configured room also removes its obsolete entities and
+stored reading when the integration reloads.
 
 ## Install
 

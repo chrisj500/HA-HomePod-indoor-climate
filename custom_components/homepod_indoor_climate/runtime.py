@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
-import logging
 from time import monotonic
 from typing import Any
 
@@ -20,7 +19,6 @@ from .const import (
     CONF_UPDATE_INTERVAL,
     DEFAULT_STALE_AFTER,
     DEFAULT_UPDATE_INTERVAL,
-    DOMAIN,
     PULSE_SECONDS,
     RATE_LIMIT_REQUESTS,
     RATE_LIMIT_WINDOW_SECONDS,
@@ -28,9 +26,13 @@ from .const import (
     STORAGE_KEY,
     STORAGE_VERSION,
 )
-from .models import Reading, aggregate, fresh_readings, validate_reading
-
-_LOGGER = logging.getLogger(__name__)
+from .models import (
+    Reading,
+    aggregate,
+    fresh_readings,
+    restore_readings,
+    validate_reading,
+)
 
 
 class HomePodIndoorClimateRuntime:
@@ -73,27 +75,24 @@ class HomePodIndoorClimateRuntime:
     async def async_start(self) -> None:
         """Restore recent data and start periodic refresh requests."""
         saved = await self._store.async_load() or {}
-        for room, data in saved.get("readings", {}).items():
-            if room not in self.room_keys:
-                continue
-            try:
-                self.readings[room] = Reading(**data)
-            except (TypeError, ValueError):
-                _LOGGER.warning("Ignoring invalid stored reading for %s", room)
+        self.readings, storage_needs_cleanup = restore_readings(
+            saved.get("readings", {}), self.room_keys
+        )
         last = saved.get("last_submission")
         if last:
             try:
                 self.last_submission = datetime.fromisoformat(last)
-            except ValueError:
-                pass
+            except (TypeError, ValueError):
+                storage_needs_cleanup = True
+
+        if storage_needs_cleanup:
+            await self._async_save_state()
 
         interval = int(self.settings.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL))
         self._cancel_interval = async_track_time_interval(
             self.hass, self._async_interval, timedelta(minutes=interval)
         )
-        self._cancel_initial = async_call_later(
-            self.hass, 10, self._async_initial_refresh
-        )
+        self._cancel_initial = async_call_later(self.hass, 10, self._async_initial_refresh)
         self._notify()
 
     async def async_stop(self) -> None:
@@ -122,23 +121,25 @@ class HomePodIndoorClimateRuntime:
         for reading in accepted:
             self.readings[reading.room] = reading
         self.last_submission = datetime.now(UTC)
-        await self._store.async_save(
-            {
-                "last_submission": self.last_submission.isoformat(),
-                "readings": {
-                    room: reading.as_dict() for room, reading in self.readings.items()
-                },
-            }
-        )
+        await self._async_save_state()
         self.async_end_refresh()
         self._notify()
         return len(accepted)
 
+    async def _async_save_state(self) -> None:
+        """Persist the current configured readings."""
+        await self._store.async_save(
+            {
+                "last_submission": (
+                    self.last_submission.isoformat() if self.last_submission else None
+                ),
+                "readings": {room: reading.as_dict() for room, reading in self.readings.items()},
+            }
+        )
+
     def fresh(self, now: datetime | None = None) -> list[Reading]:
         """Return fresh readings."""
-        return fresh_readings(
-            self.readings.values(), now or datetime.now(UTC), self.stale_after
-        )
+        return fresh_readings(self.readings.values(), now or datetime.now(UTC), self.stale_after)
 
     def stats(self, now: datetime | None = None) -> dict[str, float | int | None]:
         """Return aggregate values for fresh readings."""

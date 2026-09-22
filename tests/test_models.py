@@ -1,16 +1,12 @@
 """Tests for pure data helpers."""
 
-from datetime import UTC, datetime, timedelta
 import importlib.util
-from pathlib import Path
 import sys
-
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 MODULE_PATH = (
-    Path(__file__).parents[1]
-    / "custom_components"
-    / "homepod_indoor_climate"
-    / "models.py"
+    Path(__file__).parents[1] / "custom_components" / "homepod_indoor_climate" / "models.py"
 )
 SPEC = importlib.util.spec_from_file_location("homepod_indoor_climate_models", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -68,9 +64,7 @@ def test_fresh_only_aggregate() -> None:
     now = datetime.now(UTC)
     fresh = models.Reading("living_room", 20, 40, now.isoformat())
     fresh_two = models.Reading("bedroom", 22, 50, now.isoformat())
-    stale = models.Reading(
-        "office", 35, 90, (now - timedelta(minutes=30)).isoformat()
-    )
+    stale = models.Reading("office", 35, 90, (now - timedelta(minutes=30)).isoformat())
     values = models.fresh_readings([fresh, fresh_two, stale], now, 15)
     stats = models.aggregate(values)
     assert stats["count"] == 2
@@ -84,3 +78,28 @@ def test_empty_aggregate_is_unavailable() -> None:
     assert stats["count"] == 0
     assert stats["average_temperature_f"] is None
     assert stats["average_humidity"] is None
+
+
+def test_restore_readings_prunes_removed_and_invalid_rooms() -> None:
+    now = datetime.now(UTC).isoformat()
+    restored, needs_cleanup = models.restore_readings(
+        {
+            "living_room": {
+                "room": "living_room",
+                "temperature_c": 21,
+                "humidity": 45,
+                "updated_at": now,
+            },
+            "deleted_room": {
+                "room": "deleted_room",
+                "temperature_c": 22,
+                "humidity": 50,
+                "updated_at": now,
+            },
+            "bedroom": {"not": "a reading"},
+        },
+        {"living_room", "bedroom"},
+    )
+
+    assert set(restored) == {"living_room"}
+    assert needs_cleanup is True

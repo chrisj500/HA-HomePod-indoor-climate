@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
 import math
 import re
-from typing import Any, Iterable
-
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _NUMBER_RE = re.compile(r"^\s*(-?(?:\d+(?:\.\d*)?|\.\d+))\s*([^\d]*)$")
@@ -61,6 +61,29 @@ class Reading:
         return asdict(self)
 
 
+def restore_readings(raw_readings: Any, allowed_rooms: set[str]) -> tuple[dict[str, Reading], bool]:
+    """Restore valid configured readings and report whether storage needs pruning."""
+    if not isinstance(raw_readings, dict):
+        return {}, raw_readings not in (None, {})
+
+    restored: dict[str, Reading] = {}
+    needs_cleanup = False
+    for stored_room, data in raw_readings.items():
+        if stored_room not in allowed_rooms or not isinstance(data, dict):
+            needs_cleanup = True
+            continue
+        try:
+            reading = Reading(**data)
+        except (TypeError, ValueError):
+            needs_cleanup = True
+            continue
+        if reading.room != stored_room or reading.room not in allowed_rooms:
+            needs_cleanup = True
+            continue
+        restored[stored_room] = reading
+    return restored, needs_cleanup
+
+
 def validate_reading(payload: dict[str, Any], allowed_rooms: set[str]) -> Reading:
     """Validate one request record and normalize its values."""
     try:
@@ -68,9 +91,7 @@ def validate_reading(payload: dict[str, Any], allowed_rooms: set[str]) -> Readin
         temperature_c = _coerce_measurement(
             payload["temperature_c"], allowed_suffixes=("", "c", "°c")
         )
-        humidity = _coerce_measurement(
-            payload["humidity"], allowed_suffixes=("", "%")
-        )
+        humidity = _coerce_measurement(payload["humidity"], allowed_suffixes=("", "%"))
     except (KeyError, TypeError, ValueError) as err:
         raise ValueError("room, temperature_c, and humidity are required") from err
 
