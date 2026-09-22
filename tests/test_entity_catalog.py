@@ -24,6 +24,7 @@ def test_expected_unique_ids_drop_removed_room_entities() -> None:
     assert "entry_average_temperature" in after
     assert "entry_stale_readings" in after
     assert "entry_refresh" in after
+    assert "entry_refresh_diagnostics" in after
 
 
 def test_stale_unique_ids_identifies_only_obsolete_entities() -> None:
@@ -34,6 +35,7 @@ def test_stale_unique_ids_identifies_only_obsolete_entities() -> None:
         "entry_deleted_room_humidity",
         "entry_average_temperature",
         "entry_refresh",
+        "entry_refresh_diagnostics",
     }
 
     assert catalog.stale_unique_ids(existing, "entry", {"living_room"}) == {
